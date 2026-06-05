@@ -1,18 +1,27 @@
 bl_info = {
     "name": "KN5 Assetto Corsa Import/Export",
     "author": "LKOLA",
-    "version": (1, 0, 0),
-    "blender": (4, 0, 0),
+    "version": (2, 0, 0),
+    "blender": (5, 1, 2),
     "location": "File > Import/Export",
     "description": "Import and export KN5 files (Assetto Corsa car models) without needing ksEditor",
     "category": "Import-Export",
     "support": "COMMUNITY",
+    "doc_url": "https://github.com/LKOLA/blender-kn5-addon",
+    "tracker_url": "https://github.com/LKOLA/blender-kn5-addon/issues",
 }
 
 import bpy
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 from bpy.props import StringProperty, BoolProperty, FloatProperty
 import os
+import sys
+from pathlib import Path
+
+# Add addon directory to path for imports
+addon_dir = Path(__file__).parent
+if str(addon_dir) not in sys.path:
+    sys.path.insert(0, str(addon_dir))
 
 from . import kn5_format
 from . import kn5_importer
@@ -83,13 +92,22 @@ class ExportKN5(bpy.types.Operator, ExportHelper):
         default=True
     )
     
+    scale_factor: FloatProperty(
+        name="Scale Factor",
+        description="Scale all geometry by this factor (1.0 = no scaling)",
+        default=1.0,
+        min=0.1,
+        max=10.0
+    )
+    
     def execute(self, context):
         try:
             exporter = kn5_exporter.KN5Exporter(self.filepath)
             exporter.export_kn5(
                 export_selected=self.export_selected,
                 apply_modifiers=self.apply_modifiers,
-                triangulate=self.triangulate
+                triangulate=self.triangulate,
+                scale_factor=self.scale_factor
             )
             self.report({'INFO'}, "KN5 exported successfully")
             return {'FINISHED'}
@@ -108,16 +126,19 @@ def menu_func_export(self, context):
     self.layout.operator(ExportKN5.bl_idname, text="KN5 - Assetto Corsa (.kn5)")
 
 
+classes = (ImportKN5, ExportKN5)
+
+
 def register():
-    bpy.utils.register_class(ImportKN5)
-    bpy.utils.register_class(ExportKN5)
+    for cls in classes:
+        bpy.utils.register_class(cls)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
 
 
 def unregister():
-    bpy.utils.unregister_class(ImportKN5)
-    bpy.utils.unregister_class(ExportKN5)
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
 

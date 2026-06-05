@@ -2,6 +2,8 @@
 KN5 Binary Format Handler
 Handles reading and writing of Assetto Corsa KN5 files
 Based on community reverse-engineering of the format
+
+Blender 5.1.2+ Compatible
 """
 
 import struct
@@ -9,6 +11,7 @@ import math
 from typing import List, Tuple, Dict, Optional
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 
 
 class NodeType(Enum):
@@ -20,6 +23,7 @@ class NodeType(Enum):
 
 @dataclass
 class Vector3:
+    """3D Vector"""
     x: float
     y: float
     z: float
@@ -27,8 +31,15 @@ class Vector3:
     def to_tuple(self) -> Tuple[float, float, float]:
         return (self.x, self.y, self.z)
     
+    def __mul__(self, scalar: float) -> 'Vector3':
+        """Scalar multiplication"""
+        return Vector3(self.x * scalar, self.y * scalar, self.z * scalar)
+    
+    def __rmul__(self, scalar: float) -> 'Vector3':
+        return self.__mul__(scalar)
+    
     @classmethod
-    def from_tuple(cls, t: Tuple[float, float, float]):
+    def from_tuple(cls, t: Tuple[float, float, float]) -> 'Vector3':
         return cls(t[0], t[1], t[2])
 
 
@@ -40,14 +51,14 @@ class Matrix44:
     def __init__(self):
         # Identity matrix
         self.m = [
-            [1, 0, 0, 0],
-            [0, 1, 0, 0],
-            [0, 0, 1, 0],
-            [0, 0, 0, 1]
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0]
         ]
     
     @classmethod
-    def from_list(cls, values: List[float]):
+    def from_list(cls, values: List[float]) -> 'Matrix44':
         """Create from 16 floats"""
         m = cls()
         for i in range(4):
@@ -61,19 +72,33 @@ class Matrix44:
         for row in self.m:
             result.extend(row)
         return result
+    
+    def scale(self, scalar: float) -> 'Matrix44':
+        """Create scaled copy"""
+        scaled = Matrix44()
+        for i in range(4):
+            for j in range(4):
+                scaled.m[i][j] = self.m[i][j]
+        # Scale translation components
+        scaled.m[0][3] *= scalar
+        scaled.m[1][3] *= scalar
+        scaled.m[2][3] *= scalar
+        return scaled
 
 
 @dataclass
 class Vertex:
+    """Mesh vertex with attributes"""
     position: Vector3
     normal: Vector3
     uv: Tuple[float, float]
-    tangent: Vector3 = None
+    tangent: Optional[Vector3] = None
     color: Tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
 
 
 @dataclass
 class Material:
+    """KN5 Material definition"""
     name: str
     shader_name: str
     texture_diffuse: Optional[str] = None
@@ -84,6 +109,7 @@ class Material:
 
 @dataclass
 class Mesh:
+    """KN5 Mesh data"""
     name: str
     vertices: List[Vertex]
     indices: List[int]  # Triangle indices
@@ -93,6 +119,7 @@ class Mesh:
 
 @dataclass
 class Node:
+    """KN5 Scene node"""
     name: str
     node_type: NodeType
     transform: Matrix44
@@ -110,7 +137,7 @@ class KN5File:
     VERSION = 6  # Assetto Corsa uses version 6
     
     def __init__(self):
-        self.version = self.VERSION
+        self.version: int = self.VERSION
         self.root_node: Node = Node("root", NodeType.Base, Matrix44())
         self.materials: List[Material] = []
         self.textures: Dict[str, bytes] = {}  # Embedded textures
@@ -120,7 +147,7 @@ class KN5File:
         self.materials.append(material)
         return len(self.materials) - 1
     
-    def add_node(self, node: Node, parent: Optional[Node] = None):
+    def add_node(self, node: Node, parent: Optional[Node] = None) -> None:
         """Add node to hierarchy"""
         if parent is None:
             parent = self.root_node
@@ -131,9 +158,9 @@ class KN5Reader:
     """Reads KN5 binary files"""
     
     def __init__(self, filepath: str):
-        self.filepath = filepath
-        self.data = None
-        self.pos = 0
+        self.filepath = Path(filepath)
+        self.data: Optional[bytes] = None
+        self.pos: int = 0
     
     def read_file(self) -> KN5File:
         """Read and parse a KN5 file"""
@@ -163,37 +190,52 @@ class KN5Reader:
         return kn5
     
     def _read_bytes(self, count: int) -> bytes:
+        """Read raw bytes"""
+        if self.data is None:
+            raise RuntimeError("No data loaded")
         result = self.data[self.pos:self.pos + count]
         self.pos += count
         return result
     
     def _read_uint32(self) -> int:
+        """Read unsigned 32-bit integer"""
+        if self.data is None:
+            raise RuntimeError("No data loaded")
         value = struct.unpack_from('<I', self.data, self.pos)[0]
         self.pos += 4
         return value
     
     def _read_float(self) -> float:
+        """Read single-precision float"""
+        if self.data is None:
+            raise RuntimeError("No data loaded")
         value = struct.unpack_from('<f', self.data, self.pos)[0]
         self.pos += 4
         return value
     
     def _read_string(self) -> str:
+        """Read length-prefixed UTF-8 string"""
+        if self.data is None:
+            raise RuntimeError("No data loaded")
         length = self._read_uint32()
         string = self.data[self.pos:self.pos + length].decode('utf-8', errors='ignore')
         self.pos += length
         return string
     
     def _read_vector3(self) -> Vector3:
+        """Read 3D vector"""
         x = self._read_float()
         y = self._read_float()
         z = self._read_float()
         return Vector3(x, y, z)
     
     def _read_matrix44(self) -> Matrix44:
+        """Read 4x4 matrix"""
         values = [self._read_float() for _ in range(16)]
         return Matrix44.from_list(values)
     
     def _read_material(self) -> Material:
+        """Read material definition"""
         name = self._read_string()
         shader_name = self._read_string()
         
@@ -201,7 +243,7 @@ class KN5Reader:
         
         # Read texture slots
         texture_count = self._read_uint32()
-        for i in range(texture_count):
+        for _ in range(texture_count):
             slot_name = self._read_string()
             texture_name = self._read_string()
             
@@ -222,6 +264,7 @@ class KN5Reader:
         return material
     
     def _read_node(self) -> Node:
+        """Read scene node"""
         name = self._read_string()
         node_type = NodeType(self._read_uint32())
         transform = self._read_matrix44()
@@ -244,13 +287,14 @@ class KN5Reader:
         return node
     
     def _read_mesh(self) -> Mesh:
+        """Read mesh data"""
         name = self._read_string()
         layer_id = self._read_uint32()
         material_id = self._read_uint32()
         
         # Read vertices
         vertex_count = self._read_uint32()
-        vertices = []
+        vertices: List[Vertex] = []
         for _ in range(vertex_count):
             pos = self._read_vector3()
             normal = self._read_vector3()
@@ -275,9 +319,9 @@ class KN5Writer:
     """Writes KN5 binary files"""
     
     def __init__(self):
-        self.data = bytearray()
+        self.data: bytearray = bytearray()
     
-    def write_file(self, kn5: KN5File, filepath: str):
+    def write_file(self, kn5: KN5File, filepath: str) -> None:
         """Write KN5 file to disk"""
         self.data = bytearray()
         
@@ -293,38 +337,47 @@ class KN5Writer:
         # Write root node
         self._write_node(kn5.root_node)
         
-        with open(filepath, 'wb') as f:
+        filepath_obj = Path(filepath)
+        filepath_obj.parent.mkdir(parents=True, exist_ok=True)
+        with open(filepath_obj, 'wb') as f:
             f.write(self.data)
     
-    def _write_bytes(self, data: bytes):
+    def _write_bytes(self, data: bytes) -> None:
+        """Write raw bytes"""
         self.data.extend(data)
     
-    def _write_uint32(self, value: int):
+    def _write_uint32(self, value: int) -> None:
+        """Write unsigned 32-bit integer"""
         self.data.extend(struct.pack('<I', value))
     
-    def _write_float(self, value: float):
+    def _write_float(self, value: float) -> None:
+        """Write single-precision float"""
         self.data.extend(struct.pack('<f', value))
     
-    def _write_string(self, value: str):
+    def _write_string(self, value: str) -> None:
+        """Write length-prefixed UTF-8 string"""
         encoded = value.encode('utf-8')
         self._write_uint32(len(encoded))
         self._write_bytes(encoded)
     
-    def _write_vector3(self, vec: Vector3):
+    def _write_vector3(self, vec: Vector3) -> None:
+        """Write 3D vector"""
         self._write_float(vec.x)
         self._write_float(vec.y)
         self._write_float(vec.z)
     
-    def _write_matrix44(self, matrix: Matrix44):
+    def _write_matrix44(self, matrix: Matrix44) -> None:
+        """Write 4x4 matrix"""
         for value in matrix.to_list():
             self._write_float(value)
     
-    def _write_material(self, material: Material):
+    def _write_material(self, material: Material) -> None:
+        """Write material definition"""
         self._write_string(material.name)
         self._write_string(material.shader_name)
         
         # Write texture slots
-        textures = []
+        textures: List[Tuple[str, str]] = []
         if material.texture_diffuse:
             textures.append(("Diffuse", material.texture_diffuse))
         if material.texture_normal:
@@ -343,7 +396,8 @@ class KN5Writer:
             self._write_string(prop_name)
             self._write_float(prop_value)
     
-    def _write_node(self, node: Node):
+    def _write_node(self, node: Node) -> None:
+        """Write scene node"""
         self._write_string(node.name)
         self._write_uint32(node.node_type.value)
         self._write_matrix44(node.transform)
@@ -361,7 +415,8 @@ class KN5Writer:
         for child in node.children:
             self._write_node(child)
     
-    def _write_mesh(self, mesh: Mesh):
+    def _write_mesh(self, mesh: Mesh) -> None:
+        """Write mesh data"""
         self._write_string(mesh.name)
         self._write_uint32(mesh.layer_id)
         self._write_uint32(mesh.material_id)
