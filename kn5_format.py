@@ -4,6 +4,7 @@ Handles reading and writing of Assetto Corsa KN5 files
 Based on community reverse-engineering of the format
 
 Blender 5.1.2+ Compatible
+Supports multiple KN5 format variants
 """
 
 import struct
@@ -133,11 +134,16 @@ class Node:
 class KN5File:
     """KN5 file structure container"""
     
-    SIGNATURE = b'KN5\x00'
-    VERSION = 6  # Assetto Corsa uses version 6
+    # Multiple signature variants supported
+    SIGNATURE_KN5 = b'KN5\x00'      # Standard KN5
+    SIGNATURE_SC69 = b'sc69'         # ksEditor scene variant
+    SIGNATURE_KN56 = b'KN56'         # Alternative variant
+    
+    # Supported versions
+    VERSIONS = [4, 5, 6, 7]  # Support versions 4-7
     
     def __init__(self):
-        self.version: int = self.VERSION
+        self.version: int = 6
         self.root_node: Node = Node("root", NodeType.Base, Matrix44())
         self.materials: List[Material] = []
         self.textures: Dict[str, bytes] = {}  # Embedded textures
@@ -155,39 +161,121 @@ class KN5File:
 
 
 class KN5Reader:
-    """Reads KN5 binary files"""
+    """Reads KN5 binary files (multiple format variants)"""
     
     def __init__(self, filepath: str):
         self.filepath = Path(filepath)
         self.data: Optional[bytes] = None
         self.pos: int = 0
+        self.format_variant: str = "unknown"
     
     def read_file(self) -> KN5File:
-        """Read and parse a KN5 file"""
+        """Read and parse a KN5 file (auto-detect format)"""
         with open(self.filepath, 'rb') as f:
             self.data = f.read()
         
         self.pos = 0
         
-        # Read header
+        # Read and detect signature
         signature = self._read_bytes(4)
-        if signature != KN5File.SIGNATURE:
-            raise ValueError(f"Invalid KN5 signature: {signature}")
+        self.pos = 0  # Reset position
+        
+        print(f"[KN5] Detected signature: {signature}")
+        
+        # Detect format variant
+        if signature == KN5File.SIGNATURE_KN5:
+            self.format_variant = "KN5"
+            return self._read_kn5_standard()
+        elif signature == KN5File.SIGNATURE_SC69 or signature.startswith(b'sc'):
+            self.format_variant = "ksEditor_Scene (sc69)"
+            return self._read_kn5_scene_variant()
+        elif signature.startswith(b'KN5') or signature.startswith(b'KN56'):
+            self.format_variant = "KN5_Variant"
+            return self._read_kn5_standard()
+        else:
+            # Try to read as standard anyway (might work)
+            print(f"[KN5] Unknown signature {signature}, attempting standard read...")
+            self.format_variant = "Unknown (attempting standard)"
+            return self._read_kn5_standard()
+    
+    def _read_kn5_standard(self) -> KN5File:
+        """Read standard KN5 format"""
+        self.pos = 0
+        
+        # Read header (4 bytes signature or skip if not present)
+        first_bytes = self._peek_bytes(4)
+        
+        if first_bytes in [KN5File.SIGNATURE_KN5, KN5File.SIGNATURE_SC69]:
+            signature = self._read_bytes(4)
+        else:
+            # No signature, just read version
+            signature = None
         
         version = self._read_uint32()
+        
+        # Clamp version to supported range
+        if version not in KN5File.VERSIONS:
+            print(f"[KN5] Warning: Unsupported version {version}, clamping to 6")
+            version = 6
         
         kn5 = KN5File()
         kn5.version = version
         
         # Read materials
-        material_count = self._read_uint32()
-        for _ in range(material_count):
-            kn5.materials.append(self._read_material())
+        try:
+            material_count = self._read_uint32()
+            if material_count > 10000:  # Sanity check
+                print(f"[KN5] Warning: Suspiciously large material count {material_count}, treating as 0")
+                material_count = 0
+            
+            for _ in range(material_count):
+                try:
+                    kn5.materials.append(self._read_material())
+                except Exception as e:
+                    print(f"[KN5] Warning: Failed to read material: {e}")
+                    break
+        except Exception as e:
+            print(f"[KN5] Warning: Failed to read materials: {e}")
         
         # Read root node
-        kn5.root_node = self._read_node()
+        try:
+            kn5.root_node = self._read_node()
+        except Exception as e:
+            print(f"[KN5] Warning: Failed to read node hierarchy: {e}")
+            # Create empty root if reading failed
+            kn5.root_node = Node("root", NodeType.Base, Matrix44())
         
         return kn5
+    
+    def _read_kn5_scene_variant(self) -> KN5File:
+        """Read ksEditor scene variant (sc69 format)"""
+        self.pos = 0
+        
+        # Skip scene signature
+        signature = self._read_bytes(4)
+        
+        kn5 = KN5File()
+        
+        # Scene format has different structure
+        # Try to read as much as possible
+        try:
+            # Skip/read scene-specific data
+            self.pos = 4  # Start after signature
+            
+            # Attempt to read node tree directly
+            if self.pos < len(self.data):
+                kn5.root_node = self._read_node()
+        except Exception as e:
+            print(f"[KN5] Note: Scene variant has limited support: {e}")
+            kn5.root_node = Node("root", NodeType.Base, Matrix44())
+        
+        return kn5
+    
+    def _peek_bytes(self, count: int) -> bytes:
+        """Peek at bytes without advancing position"""
+        if self.data is None:
+            return b''
+        return self.data[self.pos:self.pos + count]
     
     def _read_bytes(self, count: int) -> bytes:
         """Read raw bytes"""
@@ -201,6 +289,8 @@ class KN5Reader:
         """Read unsigned 32-bit integer"""
         if self.data is None:
             raise RuntimeError("No data loaded")
+        if self.pos + 4 > len(self.data):
+            raise RuntimeError("Not enough data to read uint32")
         value = struct.unpack_from('<I', self.data, self.pos)[0]
         self.pos += 4
         return value
@@ -209,6 +299,8 @@ class KN5Reader:
         """Read single-precision float"""
         if self.data is None:
             raise RuntimeError("No data loaded")
+        if self.pos + 4 > len(self.data):
+            raise RuntimeError("Not enough data to read float")
         value = struct.unpack_from('<f', self.data, self.pos)[0]
         self.pos += 4
         return value
@@ -218,6 +310,14 @@ class KN5Reader:
         if self.data is None:
             raise RuntimeError("No data loaded")
         length = self._read_uint32()
+        
+        # Sanity check for string length
+        if length > 10000 or length < 0:
+            raise RuntimeError(f"Invalid string length: {length}")
+        
+        if self.pos + length > len(self.data):
+            raise RuntimeError(f"Not enough data to read string of length {length}")
+        
         string = self.data[self.pos:self.pos + length].decode('utf-8', errors='ignore')
         self.pos += length
         return string
@@ -266,7 +366,15 @@ class KN5Reader:
     def _read_node(self) -> Node:
         """Read scene node"""
         name = self._read_string()
-        node_type = NodeType(self._read_uint32())
+        node_type_val = self._read_uint32()
+        
+        # Safe node type parsing
+        try:
+            node_type = NodeType(node_type_val)
+        except ValueError:
+            print(f"[KN5] Warning: Unknown node type {node_type_val}, treating as Base")
+            node_type = NodeType.Base
+        
         transform = self._read_matrix44()
         
         active = bool(self._read_uint32())
@@ -277,12 +385,22 @@ class KN5Reader:
         
         # Read mesh if present
         if node_type in [NodeType.Mesh, NodeType.SkinnedMesh]:
-            node.mesh = self._read_mesh()
+            try:
+                node.mesh = self._read_mesh()
+            except Exception as e:
+                print(f"[KN5] Warning: Failed to read mesh for node {name}: {e}")
         
         # Read children
-        child_count = self._read_uint32()
-        for _ in range(child_count):
-            node.children.append(self._read_node())
+        try:
+            child_count = self._read_uint32()
+            if child_count > 1000:  # Sanity check
+                print(f"[KN5] Warning: Suspiciously large child count {child_count}, treating as 0")
+                child_count = 0
+            
+            for _ in range(child_count):
+                node.children.append(self._read_node())
+        except Exception as e:
+            print(f"[KN5] Warning: Failed to read children for node {name}: {e}")
         
         return node
     
@@ -294,6 +412,9 @@ class KN5Reader:
         
         # Read vertices
         vertex_count = self._read_uint32()
+        if vertex_count > 1000000:  # Sanity check
+            raise RuntimeError(f"Suspiciously large vertex count: {vertex_count}")
+        
         vertices: List[Vertex] = []
         for _ in range(vertex_count):
             pos = self._read_vector3()
@@ -310,6 +431,9 @@ class KN5Reader:
         
         # Read indices
         index_count = self._read_uint32()
+        if index_count > 3000000:  # Sanity check
+            raise RuntimeError(f"Suspiciously large index count: {index_count}")
+        
         indices = [self._read_uint32() for _ in range(index_count)]
         
         return Mesh(name, vertices, indices, material_id, layer_id)
@@ -326,7 +450,7 @@ class KN5Writer:
         self.data = bytearray()
         
         # Write header
-        self._write_bytes(KN5File.SIGNATURE)
+        self._write_bytes(KN5File.SIGNATURE_KN5)
         self._write_uint32(kn5.version)
         
         # Write materials

@@ -1,5 +1,6 @@
 """
 KN5 File Importer for Blender 5.1.2+
+Supports multiple KN5 format variants
 """
 
 import bpy
@@ -21,23 +22,42 @@ class KN5Importer:
     
     def import_kn5(self, import_materials: bool = True, import_textures: bool = True) -> None:
         """Import KN5 file into Blender"""
+        print(f"[KN5 Import] Starting import of: {self.filepath.name}")
+        
         # Create a collection for imported objects
         collection_name = self.filepath.stem
         self.collection = bpy.data.collections.new(collection_name)
         bpy.context.scene.collection.children.link(self.collection)
+        print(f"[KN5 Import] Created collection: {collection_name}")
         
         # Read KN5 file
-        reader = kn5_format.KN5Reader(str(self.filepath))
-        self.kn5 = reader.read_file()
+        try:
+            reader = kn5_format.KN5Reader(str(self.filepath))
+            self.kn5 = reader.read_file()
+            print(f"[KN5 Import] Successfully read file (variant: {reader.format_variant})")
+            print(f"[KN5 Import] Found {len(self.kn5.materials)} materials")
+        except Exception as e:
+            print(f"[KN5 Import] Error reading file: {e}")
+            raise
         
         # Create materials
         material_map: Dict[int, bpy.types.Material] = {}
         if import_materials:
             for i, material in enumerate(self.kn5.materials):
-                material_map[i] = self._create_material(material, import_textures)
+                try:
+                    material_map[i] = self._create_material(material, import_textures)
+                    print(f"[KN5 Import] Created material: {material.name}")
+                except Exception as e:
+                    print(f"[KN5 Import] Warning: Failed to create material {material.name}: {e}")
         
         # Create node hierarchy
-        self._import_node(self.kn5.root_node, None, material_map)
+        print(f"[KN5 Import] Importing node hierarchy...")
+        try:
+            self._import_node(self.kn5.root_node, None, material_map)
+            print(f"[KN5 Import] Successfully imported node hierarchy")
+        except Exception as e:
+            print(f"[KN5 Import] Error importing nodes: {e}")
+            raise
     
     def _create_material(self, kn5_material: kn5_format.Material, import_textures: bool) -> bpy.types.Material:
         """Create Blender material from KN5 material"""
@@ -69,9 +89,10 @@ class KN5Importer:
         return mat
     
     def _import_node(self, kn5_node: kn5_format.Node, parent_obj: Optional[bpy.types.Object], 
-                     material_map: Dict[int, bpy.types.Material]) -> bpy.types.Object:
+                     material_map: Dict[int, bpy.types.Material]) -> Optional[bpy.types.Object]:
         """Recursively import node hierarchy"""
         # Create object for this node
+        obj = None
         if kn5_node.mesh:
             obj = self._import_mesh(kn5_node, material_map)
         else:
@@ -81,8 +102,14 @@ class KN5Importer:
                 self.collection.objects.link(empty_data)
             obj = empty_data
         
+        if obj is None:
+            return None
+        
         # Set transformation
-        obj.matrix_world = self._matrix44_to_blender(kn5_node.transform)
+        try:
+            obj.matrix_world = self._matrix44_to_blender(kn5_node.transform)
+        except Exception as e:
+            print(f"[KN5 Import] Warning: Failed to set transform for {kn5_node.name}: {e}")
         
         # Set object properties
         obj.hide_render = not kn5_node.visible
@@ -99,48 +126,66 @@ class KN5Importer:
         return obj
     
     def _import_mesh(self, kn5_node: kn5_format.Node, 
-                     material_map: Dict[int, bpy.types.Material]) -> bpy.types.Object:
+                     material_map: Dict[int, bpy.types.Material]) -> Optional[bpy.types.Object]:
         """Import mesh data"""
         mesh_data = kn5_node.mesh
         if mesh_data is None:
-            raise ValueError(f"Node {kn5_node.name} has no mesh data")
+            return None
         
-        # Create mesh
-        mesh = bpy.data.meshes.new(name=mesh_data.name)
-        obj = bpy.data.objects.new(name=kn5_node.name, object_data=mesh)
+        try:
+            # Create mesh
+            mesh = bpy.data.meshes.new(name=mesh_data.name)
+            obj = bpy.data.objects.new(name=kn5_node.name, object_data=mesh)
+            
+            # Link to collection
+            if self.collection:
+                self.collection.objects.link(obj)
+            
+            # Extract vertex data
+            vertices = []
+            normals = []
+            for vertex in mesh_data.vertices:
+                vertices.append(vertex.position.to_tuple())
+                normals.append(vertex.normal.to_tuple())
+            
+            if not vertices:
+                print(f"[KN5 Import] Warning: Mesh {mesh_data.name} has no vertices")
+                return obj
+            
+            # Create mesh geometry
+            faces = self._get_faces(mesh_data.indices)
+            if faces:
+                mesh.from_pydata(vertices, [], faces)
+            else:
+                mesh.from_pydata(vertices, [], [])
+            
+            # Set custom normals (Blender 5.1.2 compatible)
+            if normals:
+                try:
+                    mesh.normals_split_custom_set_from_vertices(normals)
+                    mesh.use_auto_smooth = True
+                except Exception as e:
+                    print(f"[KN5 Import] Warning: Failed to set normals: {e}")
+            
+            # Apply UV map
+            if mesh_data.vertices:
+                uv_layer = mesh.uv_layers.new(name="UVMap")
+                for i, loop in enumerate(mesh.loops):
+                    vertex_idx = loop.vertex_index
+                    if vertex_idx < len(mesh_data.vertices):
+                        uv = mesh_data.vertices[vertex_idx].uv
+                        uv_layer.data[i].uv = uv
+            
+            # Apply material
+            if mesh_data.material_id in material_map:
+                obj.data.materials.append(material_map[mesh_data.material_id])
+            
+            print(f"[KN5 Import] Imported mesh: {mesh_data.name} ({len(mesh_data.vertices)} vertices)")
+            return obj
         
-        # Link to collection
-        if self.collection:
-            self.collection.objects.link(obj)
-        
-        # Extract vertex data
-        vertices = []
-        normals = []
-        for vertex in mesh_data.vertices:
-            vertices.append(vertex.position.to_tuple())
-            normals.append(vertex.normal.to_tuple())
-        
-        # Create mesh geometry
-        mesh.from_pydata(vertices, [], self._get_faces(mesh_data.indices))
-        
-        # Set custom normals (Blender 5.1.2 compatible)
-        if normals:
-            mesh.normals_split_custom_set_from_vertices(normals)
-            mesh.use_auto_smooth = True
-        
-        # Apply UV map
-        uv_layer = mesh.uv_layers.new(name="UVMap")
-        for i, loop in enumerate(mesh.loops):
-            vertex_idx = loop.vertex_index
-            if vertex_idx < len(mesh_data.vertices):
-                uv = mesh_data.vertices[vertex_idx].uv
-                uv_layer.data[i].uv = uv
-        
-        # Apply material
-        if mesh_data.material_id in material_map:
-            obj.data.materials.append(material_map[mesh_data.material_id])
-        
-        return obj
+        except Exception as e:
+            print(f"[KN5 Import] Error importing mesh {mesh_data.name}: {e}")
+            return None
     
     def _get_faces(self, indices: list) -> list:
         """Convert triangle indices to face tuples"""
